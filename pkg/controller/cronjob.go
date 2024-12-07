@@ -187,12 +187,6 @@ func (ch *CronJobHPA) ScaleHPA() (msg string, err error) {
 		updateHPA = true
 	}
 
-	//
-	if hpa.Status.CurrentReplicas == *hpa.Spec.MinReplicas && ch.DesiredSize < hpa.Status.CurrentReplicas {
-		*hpa.Spec.MinReplicas = ch.DesiredSize
-		updateHPA = true
-	}
-
 	if hpa.Status.CurrentReplicas < ch.DesiredSize {
 		*hpa.Spec.MinReplicas = ch.DesiredSize
 		updateHPA = true
