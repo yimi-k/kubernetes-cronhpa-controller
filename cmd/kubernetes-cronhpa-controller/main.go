@@ -19,9 +19,9 @@ package main
 import (
 	"flag"
 	"github.com/AliyunContainerService/kubernetes-cronhpa-controller/pkg/apis"
-	autoscalingv1beta1 "github.com/AliyunContainerService/kubernetes-cronhpa-controller/pkg/apis/autoscaling/v1beta1"
 	"github.com/AliyunContainerService/kubernetes-cronhpa-controller/pkg/controller"
-	klog "k8s.io/klog/v2"
+	"k8s.io/klog/v2"
+	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -36,37 +36,30 @@ var (
 )
 
 func main() {
+	klog.InitFlags(nil)
 	flag.StringVar(&pprofAddr, "pprof-bind-address", ":6060", "The address the pprof endpoint binds to.")
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "The address the metric endpoint binds to.")
+	flag.BoolVar(&enableLeaderElection, "enableLeaderElection", false, "default false, if enabled the cronHPA would be in primary and standby mode.")
 	flag.Parse()
+
 	klog.Info("Start cronHPA controller.")
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		LeaderElection:     enableLeaderElection,
 		LeaderElectionID:   "kubernetes-cronhpa-controller",
 		MetricsBindAddress: metricsAddr,
+		Scheme:             apis.Scheme,
 	})
 	if err != nil {
 		klog.Errorf("Failed to set up controller manager,because of %v", err)
 		os.Exit(1)
 	}
-
-	// in a real controller, we'd create a new scheme for this
-	err = apis.AddToScheme(mgr.GetScheme())
-	if err != nil {
-		klog.Errorf("Failed to add apis to scheme,because of %v", err)
-		os.Exit(1)
-	}
-
-	err = ctrl.NewControllerManagedBy(mgr).
-		For(&autoscalingv1beta1.CronHorizontalPodAutoscaler{}).
-		Complete(controller.NewReconciler(mgr))
-	if err != nil {
-		klog.Errorf("Failed to set up controller watch loop,because of %v", err)
-		os.Exit(1)
-	}
+	controller.Register(mgr)
 
 	go func() {
-		http.ListenAndServe(pprofAddr, nil)
+		if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+			log.Println("Failed to start pprof server:", err)
+			return
+		}
 	}()
 
 	// Start the Cmd
@@ -74,9 +67,4 @@ func main() {
 		klog.Errorf("Failed to start up controller manager,because of %v", err)
 		os.Exit(1)
 	}
-}
-
-func init() {
-	flag.BoolVar(&enableLeaderElection, "enableLeaderElection", false, "default false, if enabled the cronHPA would be in primary and standby mode.")
-	klog.InitFlags(nil)
 }
