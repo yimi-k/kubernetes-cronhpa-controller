@@ -16,3 +16,5 @@ limitations under the License.
 
 // Package autoscaling contains autoscaling API versions
 package autoscaling
+
+var GroupName = "autoscaling.alibabacloud.com"

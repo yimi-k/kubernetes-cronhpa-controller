@@ -47,7 +47,7 @@ type Item struct {
 func (ws *WebServer) handleIndexController(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	tmpl, _ := template.New("index").Parse(server.Template)
-	entries := ws.cronManager.cronExecutor.ListEntries()
+	entries := ws.cronManager.jobManager.ListEntries()
 	d := data{
 		Items: make([]Item, 0),
 	}
@@ -60,8 +60,8 @@ func (ws *WebServer) handleIndexController(w http.ResponseWriter, r *http.Reques
 		d.Items = append(d.Items, Item{
 			Id:        job.ID(),
 			Name:      job.Name(),
-			CronHPA:   job.CronHPAMeta().Name,
-			Namespace: job.CronHPAMeta().Namespace,
+			CronHPA:   job.CronHPA().Name,
+			Namespace: job.CronHPA().Namespace,
 			Pre:       e.Prev.String(),
 			Next:      e.Next.String(),
 		})
@@ -70,7 +70,7 @@ func (ws *WebServer) handleIndexController(w http.ResponseWriter, r *http.Reques
 }
 
 func (ws *WebServer) handleJobsController(w http.ResponseWriter, r *http.Request) {
-	b, err := json.Marshal(ws.cronManager.cronExecutor.ListEntries())
+	b, err := json.Marshal(ws.cronManager.jobManager.ListEntries())
 	if err != nil {
 		w.Write([]byte(err.Error()))
 		return

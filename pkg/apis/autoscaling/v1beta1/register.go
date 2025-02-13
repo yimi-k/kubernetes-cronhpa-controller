@@ -22,13 +22,14 @@ limitations under the License.
 package v1beta1
 
 import (
+	"github.com/AliyunContainerService/kubernetes-cronhpa-controller/pkg/apis/autoscaling"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
 
 var (
 	// SchemeGroupVersion is group version used to register these objects
-	SchemeGroupVersion = schema.GroupVersion{Group: "autoscaling.alibabacloud.com", Version: "v1beta1"}
+	SchemeGroupVersion = schema.GroupVersion{Group: autoscaling.GroupName, Version: "v1beta1"}
 
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme
 	SchemeBuilder = &scheme.Builder{GroupVersion: SchemeGroupVersion}

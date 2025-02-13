@@ -22,15 +22,13 @@ import (
 	"github.com/AliyunContainerService/kubernetes-cronhpa-controller/pkg/apis/autoscaling/v1beta1"
 	autoscalingv1beta1 "github.com/AliyunContainerService/kubernetes-cronhpa-controller/pkg/apis/autoscaling/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/sets"
 	log "k8s.io/klog/v2"
+	"os"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"strings"
-	"time"
 )
 
 /**
@@ -41,7 +39,7 @@ import (
 // newReconciler returns a new reconcile.Reconciler
 func NewReconciler(mgr manager.Manager) reconcile.Reconciler {
 	var stopChan chan struct{}
-	cm := NewCronManager(mgr.GetConfig(), mgr.GetClient(), mgr.GetEventRecorderFor("CronHorizontalPodAutoscaler"))
+	cm := NewCronManager(nil, mgr)
 	r := &ReconcileCronHorizontalPodAutoscaler{Client: mgr.GetClient(), scheme: mgr.GetScheme(), CronManager: cm}
 	go func(cronManager *CronManager, stopChan chan struct{}) {
 		cm.Run(stopChan)
@@ -74,174 +72,55 @@ type ReconcileCronHorizontalPodAutoscaler struct {
 func (r *ReconcileCronHorizontalPodAutoscaler) Reconcile(context context.Context, request reconcile.Request) (reconcile.Result, error) {
 	// Fetch the CronHorizontalPodAutoscaler instance
 	log.Infof("Start to handle cronHPA %s in %s namespace", request.Name, request.Namespace)
-	instance := &autoscalingv1beta1.CronHorizontalPodAutoscaler{}
-	err := r.Get(context, request.NamespacedName, instance)
+	cronHpa := &autoscalingv1beta1.CronHorizontalPodAutoscaler{}
+	err := r.Get(context, request.NamespacedName, cronHpa)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// Object not found, return.  Created objects are automatically garbage collected.
 			// For additional cleanup logic use finalizers.
 			log.Infof("GC start for: cronHPA %s in %s namespace is not found", request.Name, request.Namespace)
-			go r.CronManager.GC()
+			r.CronManager.jobManager.RemoveAllByCronHpa(request.Name)
 			return reconcile.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
 		return reconcile.Result{}, err
 	}
+	r.CronManager.Clean(cronHpa)
 
-	//log.Infof("%v is handled by cron-hpa controller", instance.Name)
-	conditions := instance.Status.Conditions
-
-	leftConditions := make([]v1beta1.Condition, 0)
-	// check scaleTargetRef and excludeDates
-	if checkGlobalParamsChanges(instance.Status, instance.Spec) {
-		for _, cJob := range conditions {
-			err := r.CronManager.delete(cJob.JobId)
-			if err != nil {
-				log.Errorf("Failed to delete job %s in cronHPA %s namespace %s, because of %v", cJob.Name, instance.Name, instance.Namespace, err)
-			}
-		}
-		// update scaleTargetRef and excludeDates
-		instance.Status.ScaleTargetRef = instance.Spec.ScaleTargetRef
-		instance.Status.ExcludeDates = instance.Spec.ExcludeDates
-	} else {
-		// check status and delete the expired job
-		for _, cJob := range conditions {
-			skip := false
-			for _, job := range instance.Spec.Jobs {
-				if cJob.Name == job.Name {
-					// schedule has changed or RunOnce changed
-					if cJob.Schedule != job.Schedule || cJob.RunOnce != job.RunOnce || cJob.TargetSize != job.TargetSize {
-						// jobId exists and remove the job from cronManager
-						if cJob.JobId != "" {
-							err := r.CronManager.delete(cJob.JobId)
-							if err != nil {
-								log.Errorf("Failed to delete expired job %s in cronHPA %s namespace %s,because of %v", cJob.Name, instance.Name, instance.Namespace, err)
-							}
-						}
-						continue
-					}
-					// if nothing changed
-					skip = true
-				}
-			}
-
-			// need remove this condition because this is not job spec
-			if !skip {
-				if cJob.JobId != "" {
-					err := r.CronManager.delete(cJob.JobId)
-					if err != nil {
-						log.Errorf("Failed to delete expired job %s in cronHPA %s namespace %s, because of %v", cJob.Name, instance.Name, instance.Namespace, err)
-					}
-				}
-			}
-
-			// if job nothing changed then append to left conditions
-			if skip {
-				leftConditions = append(leftConditions, cJob)
-			}
-		}
-	}
-
-	// update the left to next step
-	instance.Status.Conditions = leftConditions
-	leftConditionsMap := convertConditionMaps(leftConditions)
-
-	noNeedUpdateStatus := true
-
-	for _, job := range instance.Spec.Jobs {
-		jobCondition := v1beta1.Condition{
-			Name:          job.Name,
-			Schedule:      job.Schedule,
-			RunOnce:       job.RunOnce,
-			TargetSize:    job.TargetSize,
-			LastProbeTime: metav1.Time{Time: time.Now()},
-		}
-		j, err := CronHPAJobFactory(instance, job, r.CronManager.scaler, r.CronManager.mapper, r.Client)
-
-		if err != nil {
-			jobCondition.State = v1beta1.Failed
-			jobCondition.Message = fmt.Sprintf("Failed to create cron hpa job %s in %s namespace %s,because of %v",
-				job.Name, instance.Name, instance.Namespace, err)
-			log.Errorf("Failed to create cron hpa job %s,because of %v", job.Name, err)
+	conditions := make([]autoscalingv1beta1.Condition, 0)
+	for _, job := range cronHpa.Spec.Jobs {
+		condition := NewCondition(job)
+		var cronJob *BaseCronJob
+		if cronJob, err = NewCronJob(cronHpa, job); err != nil {
+			condition.State = v1beta1.Failed
+			condition.Message = fmt.Sprintf("Failed to create cron hpa job %s in %s namespace %s,because of %v",
+				job.Name, cronHpa.Name, cronHpa.Namespace, err)
 		} else {
-			name := job.Name
-			if c, ok := leftConditionsMap[name]; ok {
-				jobId := c.JobId
-				j.SetID(jobId)
-
-				// run once and return when reaches the final state
-				if runOnce(job) && (c.State == v1beta1.Succeed || c.State == v1beta1.Failed) {
-					err := r.CronManager.delete(jobId)
-					if err != nil {
-						log.Errorf("cron hpa runonce job %s(%s) in %s namespace %s has ran once but fail to exit,because of %v",
-							name, jobId, instance.Name, instance.Namespace, err)
-					}
-					continue
-				}
-			}
-
-			jobCondition.JobId = j.ID()
-			err := r.CronManager.createOrUpdate(j)
-			if err != nil {
-				if _, ok := err.(*NoNeedUpdate); ok {
-					continue
-				} else {
-					jobCondition.State = v1beta1.Failed
-					jobCondition.Message = fmt.Sprintf("Failed to update cron hpa job %s,because of %v", job.Name, err)
-				}
+			if err := r.CronManager.jobManager.Add(cronJob); err != nil {
+				condition.State = v1beta1.Failed
+				condition.Message = fmt.Sprintf("Failed to update cron hpa job %s,because of %v", job.Name, err)
 			} else {
-				jobCondition.State = v1beta1.Submitted
+				condition.State = v1beta1.Submitted
 			}
+			condition.JobId = cronJob.ID()
 		}
-		noNeedUpdateStatus = false
-		instance.Status.Conditions = updateConditions(instance.Status.Conditions, jobCondition)
-	}
-	// conditions are not changed and no need to update.
-	if !noNeedUpdateStatus || len(leftConditions) != len(conditions) {
-		err := r.Update(context, instance)
-		if err != nil {
-			log.Errorf("Failed to update cron hpa %s in namespace %s status, because of %v", instance.Name, instance.Namespace, err)
-		}
+		conditions = append(conditions, condition)
 	}
 
-	//log.Infof("%v has been handled completely.", instance)
-	return reconcile.Result{}, nil
+	if err := r.Update(context, cronHpa); err != nil {
+		log.Errorf("Failed to update cron hpa %s in namespace %s status, because of %v", cronHpa.Name, cronHpa.Namespace, err)
+	}
+
+	log.Infof("%v has been handled completely.", cronHpa.Name)
+	return reconcile.Result{}, err
 }
 
-func convertConditionMaps(conditions []v1beta1.Condition) map[string]v1beta1.Condition {
-	m := make(map[string]v1beta1.Condition)
-	for _, condition := range conditions {
-		m[condition.Name] = condition
+func Register(mgr manager.Manager) {
+	err := ctrl.NewControllerManagedBy(mgr).
+		For(&autoscalingv1beta1.CronHorizontalPodAutoscaler{}).
+		Complete(NewReconciler(mgr))
+	if err != nil {
+		log.Errorf("Failed to set up controller watch loop,because of %v", err)
+		os.Exit(1)
 	}
-	return m
-}
-
-func updateConditions(conditions []v1beta1.Condition, condition v1beta1.Condition) []v1beta1.Condition {
-	r := make([]v1beta1.Condition, 0)
-	m := convertConditionMaps(conditions)
-	m[condition.Name] = condition
-	for _, condition := range m {
-		r = append(r, condition)
-	}
-	return r
-}
-
-// if global params changed then all jobs need to be recreated.
-func checkGlobalParamsChanges(status v1beta1.CronHorizontalPodAutoscalerStatus, spec v1beta1.CronHorizontalPodAutoscalerSpec) bool {
-	if &status.ScaleTargetRef != nil && (status.ScaleTargetRef.Kind != spec.ScaleTargetRef.Kind || status.ScaleTargetRef.ApiVersion != spec.ScaleTargetRef.ApiVersion ||
-		status.ScaleTargetRef.Name != spec.ScaleTargetRef.Name) {
-		return true
-	}
-
-	curExcludeDates := sets.NewString(spec.ExcludeDates...)
-	preExcludeDates := sets.NewString(status.ExcludeDates...)
-
-	return !curExcludeDates.Equal(preExcludeDates)
-}
-
-func runOnce(job v1beta1.Job) bool {
-	if strings.Contains(job.Schedule, "@date ") || job.RunOnce {
-		return true
-	}
-	return false
 }
